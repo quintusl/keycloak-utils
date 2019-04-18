@@ -86,6 +86,7 @@ kc_create_user() {
     "enabled": "true",
     "username": "'"$username"'",
     "email": "'"$email"'",
+    "emailVerified": true,
     "firstName": "'"$firstname"'",
     "lastName": "'"$lastname"'"
   }' "$base_url/admin/realms/$realm/users")
@@ -151,7 +152,7 @@ kc_set_pwd() {
   --data '{
     "type": "password",
     "value": "'"$password"'",
-    "temporary": "true"
+    "temporary": false
   }' "$base_url/admin/realms/$realm/users/$userid/reset-password")
   msg="$username: password set to $password"
   process_result "204" "$result" "$msg"
@@ -214,15 +215,22 @@ import_accts() {
   #kc_logout
 }
 
-delete_accts(){
-
-        kc_login
+delete_accts() {
+  kc_login
+  count=1
   while read -r line; do
     IFS=',' read -ra arr <<< "$line"
-          kc_lookup_username "${arr[2]}"
-          kc_delete_user $userid
+    kc_lookup_username "${arr[2]}"
+    kc_delete_user $userid
+    count=`expr $count + 1`
+    if [ $count -gt 10 ]; then
+      count=1
+      kc_refresh_token
+      sleep 5
+    else
+      sleep 1
+    fi
   done < "$csv_file"
- 
 }
 
 #### Main
