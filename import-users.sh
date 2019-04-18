@@ -7,6 +7,7 @@ refresh_token=""
 userid=""
 realm=""
 client_id=""
+client_secret=""
 
 #### Helpers
 process_result() {
@@ -32,12 +33,13 @@ kc_login() {
   read -p "Base URL (e.g: https://myhostname/auth): " base_url
   read -p "Realm: " realm
   read -p "Client ID (create this client in the above Keycloak realm): " client_id
+  read -p "Client secret: " client_secret
   read -p "Admin username: " admin_id
   read -s -p "Admin Password: " admin_pwd; echo
 
-  result=$(curl --write-out " %{http_code}" -s -k --request POST \
+  result=$(curl --cookie cookies.txt --cookie-jar cookies.txt --write-out " %{http_code}" -s -k --request POST \
     --header "Content-Type: application/x-www-form-urlencoded" \
-    --data "username=$admin_id&password=$admin_pwd&client_id=$client_id&grant_type=password" \
+    --data "username=$admin_id&password=$admin_pwd&client_id=$client_id&client_secret=$client_secret&grant_type=password" \
     "$base_url/realms/$realm/protocol/openid-connect/token")
 
   admin_pwd=""  #clear password
@@ -53,13 +55,31 @@ kc_login() {
   refresh_token=$(sed -E -n 's/.*"refresh_token":"([^"]+)".*/\1/p' <<< "$result")
 }
 
+kc_refresh_token() {
+  result=$(curl --cookie cookies.txt --cookie-jar cookies.txt --write-out " %{http_code}" -s -k --request POST \
+    --header "Content-Type: application/x-www-form-urlencoded" \
+    --data "client_id=$client_id&client_secret=$client_secret&grant_type=refresh_token&refresh_token=$refresh_token" \
+    "$base_url/realms/$realm/protocol/openid-connect/token")
+
+  msg="Refresh token"
+  process_result "200" "$result" "$msg"
+  if [ $? -ne 0 ]; then
+    echo "Failed to refresh token. Exiting."
+    exit 1  #no point continuing if token refresh failed.
+  fi
+
+  # Extract access_token
+  access_token=$(sed -E -n 's/.*"access_token":"([^"]+)".*/\1/p' <<< "$result")
+  refresh_token=$(sed -E -n 's/.*"refresh_token":"([^"]+)".*/\1/p' <<< "$result")
+}
+
 kc_create_user() {
   firstname="$1"
   lastname="$2"
   username="$3"
   email="$4"
 
-  result=$(curl -i -s -k --request POST \
+  result=$(curl --cookie cookies.txt --cookie-jar cookies.txt -i -s -k --request POST \
   --header "Content-Type: application/json" \
   --header "Authorization: Bearer $access_token" \
   --data '{
@@ -72,6 +92,7 @@ kc_create_user() {
 
   # userid=$(echo "$result" | grep -o "Location: .*" | egrep -o '[a-zA-Z0-9]+(-[a-zA-Z0-9]+)+') #parse userid
   # userid=`echo $userid | awk '{ print $2 }'`
+  echo $result
   http_code=$(sed -E -n 's,HTTP[^ ]+ ([0-9]{3}) .*,\1,p' <<< "$result") #parse HTTP coded
   kc_lookup_username $username
   msg="$username: insert ($userid)"
@@ -82,7 +103,7 @@ kc_create_user() {
 kc_delete_user() {
   userid="$1"
 
-  result=$(curl --write-out " %{http_code}" -s -k --request DELETE \
+  result=$(curl --cookie cookies.txt --cookie-jar cookies.txt --write-out " %{http_code}" -s -k --request DELETE \
   --header "Authorization: Bearer $access_token" \
   "$base_url/admin/realms/$realm/users/$userid")
 
@@ -95,7 +116,7 @@ kc_delete_user() {
 kc_lookup_username() {
   username="$1"
 
-  result=$(curl --write-out " %{http_code}" -s -k --request GET \
+  result=$(curl --cookie cookies.txt --cookie-jar cookies.txt --write-out " %{http_code}" -s -k --request GET \
   --header "Authorization: Bearer $access_token" \
   "$base_url/admin/realms/$realm/users?username=${username}")
 
@@ -111,7 +132,7 @@ kc_set_group_hard() {
   userid="$1"
   groupid="$2"
 
-  result=$(curl --write-out " %{http_code}" -s -k --request PUT \
+  result=$(curl --cookie cookies.txt --cookie-jar cookies.txt --write-out " %{http_code}" -s -k --request PUT \
   --header "Content-Type: application/json" \
   --header "Authorization: Bearer $access_token" \
    "$base_url/admin/realms/$realm/users/$userid/groups/$groupid")
@@ -124,7 +145,7 @@ kc_set_pwd() {
   userid="$1"
   password="$2"
 
-  result=$(curl --write-out " %{http_code}" -s -k --request PUT \
+  result=$(curl --cookie cookies.txt --cookie-jar cookies.txt --write-out " %{http_code}" -s -k --request PUT \
   --header "Content-Type: application/json" \
   --header "Authorization: Bearer $access_token" \
   --data '{
@@ -138,9 +159,9 @@ kc_set_pwd() {
 }
 
 kc_logout() {
-  result=$(curl --write-out " %{http_code}" -s -k --request POST \
+  result=$(curl --cookie cookies.txt --cookie-jar cookies.txt --write-out " %{http_code}" -s -k --request POST \
   --header "Content-Type: application/x-www-form-urlencoded" \
-  --data "client_id=$client_id&refresh_token=$refresh_token" \
+  --data "client_id=$client_id&client_secret=$client_secret&refresh_token=$refresh_token" \
   "$base_url/realms/$realm/protocol/openid-connect/logout")
 
   msg="Logout"
@@ -172,13 +193,22 @@ import_accts() {
   kc_login
 
   # Import accounts line-by-line
+  count=1
   while read -r line; do
     IFS=',' read -ra arr <<< "$line"
 
     kc_create_user "${arr[0]}" "${arr[1]}" "${arr[2]}" "${arr[3]}"
 
     [ $? -ne 0 ] || kc_set_pwd "$userid" "${arr[4]}"  #skip if kc_create_user failed
-    [ $? -ne 0 ] || kc_set_group_hard "$userid" "${arr[5]}" #skip if kc_create_user failed
+    # [ $? -ne 0 ] || kc_set_group_hard "$userid" "${arr[5]}" #skip if kc_create_user failed
+    count=`expr $count + 1`
+    if [ $count -gt 10 ]; then
+      count=1
+      kc_refresh_token
+      sleep 5
+    else
+      sleep 1
+    fi
   done < "$csv_file"
 
   #kc_logout
